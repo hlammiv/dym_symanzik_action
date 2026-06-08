@@ -1,0 +1,28 @@
+LDLIBS = -lm
+#CFLAGS = -O0 -g -std=gnu99
+#CPPFLAGS = -O0 -g 
+#CXX=g++-8
+
+CPP = /usr/local/opt/llvm/bin/clang
+CPPFLAGS = -I/usr/local/opt/llvm/include
+LDFLAGS = -L/usr/local/opt/llvm/lib
+CPPFLAGS += -Xclang -fopenmp
+LDFLAGS += -lomp
+
+#CXXFLAGS = -O3 -g -std=c++11
+#CFLAGS = -O3 -std=gnu99 -Wall
+#CFLAGS = -O3 -std=gnu99 -Wall -fsanitize=address
+all: dym expectations operators
+dym expectations operators: lattice.o group.o glueballoperators.o
+clean:
+	${RM} dym-mod-metro dym-mod-metro-savecfg dym expectations operators lattice.o group.o timer.o glueballoperators.o
+
+dym-mod: dym-mod.cpp lattice.o group.o
+
+dym-mod-metro: dym-mod-metro.cpp lattice.o group.o timer.o
+
+dym-mod-metrocorr: dym-mod-metrocorr.cpp lattice.o group.o timer.o glueballoperators.o
+
+dym-mod-metro-savecfg: dym-mod-metro-savecfg.cpp lattice.o group.o timer.o
+
+test: test.cpp lattice.o group.o timer.o glueballoperators.o

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+beta1=$1
+beta2=$2
+#beta2=$(echo "-0.262*$beta1 - 0.2" | bc -l )
+seed=$RANDOM
+D=$3
+nt=$4
+nx=$5
+group=$6
+fol=$7
+
+export OMP_NUM_THREADS=4
+# export GOMP_CPU_AFFINITY=0-3
+
+out=${fol}out_b1${beta1}_b2${beta2}_g${group}_nt${nt}_nx${nx}_s${seed}.log
+
+echo "./dym-mod-metro ./groups/my$group $D $nt $nx 0 $beta1 $beta2 $seed" > $out
+date >> $out
+./dym-mod-metro ./groups/$group $D $nt $nx 0 $beta1 $beta2 $seed >> $out
+#./dym-mod-metro ./groups/my$group $D $nt $nx 0 $beta1 0 $seed >> $out
+#./dym-mod-metro-savecfg ./groups/mys1080-v4 4 $nt $nx 0 $beta1 $beta2 $seed >> $out
+date >> $out

@@ -1,0 +1,20 @@
+# --- Build artifacts (regenerable via `make`) ---
+*.o
+gmon.out
+dym-mod-metro
+dym-mod-metroOG
+dym-mod-metro-savecfg
+dym-mod-mod-metro
+rect_test
+# NOTE: kentucky2nersc is a precompiled converter with no source in this tree,
+# so it is intentionally tracked (cannot be rebuilt from here).
+
+# --- Bulk simulation output & figures (regenerate from runs; too large for git) ---
+data/
+results/
+
+# --- Local tooling / editor / OS cruft ---
+.claude/
+.*.swp
+*.swp
+.DS_Store
