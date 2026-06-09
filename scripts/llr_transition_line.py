@@ -28,7 +28,7 @@ def main():
     fo, dE, cross = {}, {}, []
     for f in sorted(glob.glob(os.path.join(args.dir, "b2_*.out"))):
         b2 = float(os.path.basename(f)[3:-4])
-        E, a, npl = R.parse(f)
+        E, a, npl, _ax = R.parse(f)
         if len(E) < 3: continue
         a = R.smooth(a, args.smooth)
         Ef, af, lnrho = R.reconstruct(E, a)

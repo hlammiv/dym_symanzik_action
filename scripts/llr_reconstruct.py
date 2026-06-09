@@ -20,17 +20,21 @@ import numpy as np
 _trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
 def parse(fname):
-    Es, ans, nplaq = [], [], None
+    """Returns (E, a_n, norm, axis): norm = NPLAQ (axis 1) or NRECT (axis 2),
+    axis = which action is windowed (1=S1/beta1-driven, 2=S2/beta2-driven)."""
+    Es, ans = [], []
+    nplaq = nrect = None; axis = 1
     f = open(fname) if fname and fname != "-" else sys.stdin
     for line in f:
-        if line.startswith("NPLAQ:"):
-            nplaq = int(line.split()[1])
+        if   line.startswith("NPLAQ:"): nplaq = int(line.split()[1])
+        elif line.startswith("NRECT:"): nrect = int(line.split()[1])
+        elif line.startswith("AXIS:"):  axis  = int(line.split()[1])
         elif line.startswith("ANE:") and "unreached" not in line:
-            t = line.split()
-            Es.append(float(t[1])); ans.append(float(t[2]))
+            t = line.split(); Es.append(float(t[1])); ans.append(float(t[2]))
     E = np.array(Es); a = np.array(ans)
     o = np.argsort(E)                 # ascending E (frozen -> disordered)
-    return E[o], a[o], nplaq
+    norm = nrect if axis == 2 else nplaq
+    return E[o], a[o], norm, axis
 
 def smooth(a, w=3):
     """Light moving-average to suppress single-point noise at the frozen floor
@@ -109,22 +113,24 @@ def main():
     ap.add_argument("--smooth", type=int, default=3, help="moving-average window on a_n (1=off)")
     args = ap.parse_args()
 
-    E, a, nplaq = parse(args.file)
-    if args.nplaq: nplaq = args.nplaq
+    E, a, norm, axis = parse(args.file)
+    if args.nplaq: norm = args.nplaq
     if len(E) < 3:
         sys.exit("need >=3 reached windows")
     a = smooth(a, args.smooth)
+    cc = "beta2" if axis == 2 else "beta1"     # the windowed coupling
+    en = "S2" if axis == 2 else "S1"           # the windowed energy
 
     Ef, af, lnrho = reconstruct(E, a)
     bc, Elo, Ehi, latent, bimodal = transition(Ef, lnrho, a)
-    print(f"beta1_c (steepest drop of <S1>) = {bc:.4f}")
+    print(f"{cc}_c (steepest drop of <{en}>) = {bc:.4f}")
     if bimodal:
-        print(f"coexistence energies S1 : E- = {Elo:.2f} (frozen)  E+ = {Ehi:.2f} (disordered)")
-        print(f"latent heat (Delta S1)  : {latent:.2f}")
-        if nplaq:
-            print(f"  in <E> units (NPLAQ={nplaq}) : Delta<E> = {latent/(nplaq*3.0):.4f}")
+        print(f"coexistence {en} : E- = {Elo:.2f} (frozen)  E+ = {Ehi:.2f} (disordered)")
+        print(f"latent heat (Delta {en})  : {latent:.2f}")
+        if norm:
+            print(f"  in <E> units (norm={norm}) : Delta<E> = {latent/(norm*3.0):.4f}")
     else:
-        print("P(S1) not bimodal at beta1_c -> transition weak/unresolved (no latent heat)")
+        print(f"P({en}) not bimodal at {cc}_c -> transition weak/unresolved (no latent heat)")
 
     if args.plot:
         import matplotlib
@@ -135,11 +141,11 @@ def main():
         ax[0].axhline(bc, color='r', ls='--', lw=1, label=f"$\\beta_{{1c}}$={bc:.3f}")
         if bimodal:
             ax[0].axvline(Elo, color='gray', ls=':'); ax[0].axvline(Ehi, color='gray', ls=':')
-        ax[0].set_xlabel("E = S1"); ax[0].set_ylabel(r"$a_n(E)=\beta_{micro}$")
+        ax[0].set_xlabel(f"E = {en}"); ax[0].set_ylabel(r"$a_n(E)=\beta_{micro}$")
         ax[0].set_title("DoS slope"); ax[0].legend()
         g = lnrho - bc*Ef; P = np.exp(g - g.max())
         ax[1].fill_between(Ef, P, alpha=0.3); ax[1].plot(Ef, P, lw=1.5)
-        ax[1].set_xlabel("E = S1"); ax[1].set_ylabel(r"$P_{\beta_{1c}}(E)$")
+        ax[1].set_xlabel(f"E = {en}"); ax[1].set_ylabel(r"$P_{\beta_{1c}}(E)$")
         ax[1].set_title(f"P at beta1_c={bc:.3f}")
         plt.tight_layout(); plt.savefig(args.plot, dpi=110)
         print(f"plot -> {args.plot}")

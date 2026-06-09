@@ -29,7 +29,7 @@ def main():
     b2s, rows, fo = [], [], {}
     for f in sorted(glob.glob(os.path.join(args.dir, "b2_*.out"))):
         b2 = float(os.path.basename(f)[3:-4])
-        E, a, _ = R.parse(f)
+        E, a, _n, _ax = R.parse(f)
         if len(E) < 3: continue
         a = R.smooth(a, 3); Ef, af, lnrho = R.reconstruct(E, a)
         Edens = Ef/(args.nplaq*3.0) + 1.0                 # <E> per plaquette
