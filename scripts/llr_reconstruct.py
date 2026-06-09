@@ -82,6 +82,25 @@ def find_betac(Ef, lnrho, a):
     k = int(np.argmin(np.abs(betas - bc)))     # nearest resolved beta for peak Es
     return bc, Efs[k], Eds[k], betas[0], betas[-1]
 
+def _rwmean(Ef, lnrho, beta):
+    g = lnrho - beta*Ef; g -= g.max(); w = np.exp(g)
+    return np.sum(Ef*w)/np.sum(w)
+
+def transition(Ef, lnrho, a, b1max=6.0, npts=600):
+    """beta1_c from the steepest drop of <S1>(beta1) -- robust for every slice,
+    including where a_n goes negative. Latent heat from find_betac (the a_n
+    equal-height extrapolation), which resolves where the back-bend is sharp
+    enough; None otherwise (the frozen peak is suppressed by floor under-
+    resolution, so a P(S1) double-peak read-off is unreliable). Returns
+    (beta1_c, E_frozen, E_disord, latent_or_None, resolved)."""
+    b1 = np.linspace(0.0, b1max, npts)
+    Em = np.array([_rwmean(Ef, lnrho, b) for b in b1])
+    bc = b1[int(np.argmax(np.abs(np.gradient(Em, b1))))]
+    r = find_betac(Ef, lnrho, a)
+    if r is not None:
+        return bc, r[1], r[2], (r[2]-r[1]), True
+    return bc, None, None, None, False
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("file", nargs="?", default="-")
@@ -97,37 +116,31 @@ def main():
     a = smooth(a, args.smooth)
 
     Ef, af, lnrho = reconstruct(E, a)
-    res = find_betac(Ef, lnrho, a)
-    if res is None:
-        print("No coexistence barrier found: a_n(E) does not back-bend over the "
-              "sampled range (no first-order transition resolved here).")
-        return
-    bc, Elo, Ehi, blo, bhi = res
-    dS1 = Ehi - Elo
-    print(f"beta1_c (equal free energy) = {bc:.4f}")
-    print(f"  resolved coexistence band : beta in [{blo:.3f}, {bhi:.3f}] (barrier exists)")
-    print(f"coexistence energies S1     : E- = {Elo:.2f} (frozen)  E+ = {Ehi:.2f} (disordered)")
-    print(f"latent heat (Delta S1)      : {dS1:.2f}")
-    if nplaq:
-        dEdens = (dS1/nplaq)/3.0               # <E> = S1/NPLAQ/3 + 1
-        print(f"  in <E> units (NPLAQ={nplaq}) : Delta<E> = {dEdens:.4f}")
+    bc, Elo, Ehi, latent, bimodal = transition(Ef, lnrho, a)
+    print(f"beta1_c (steepest drop of <S1>) = {bc:.4f}")
+    if bimodal:
+        print(f"coexistence energies S1 : E- = {Elo:.2f} (frozen)  E+ = {Ehi:.2f} (disordered)")
+        print(f"latent heat (Delta S1)  : {latent:.2f}")
+        if nplaq:
+            print(f"  in <E> units (NPLAQ={nplaq}) : Delta<E> = {latent/(nplaq*3.0):.4f}")
+    else:
+        print("P(S1) not bimodal at beta1_c -> transition weak/unresolved (no latent heat)")
 
     if args.plot:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-        ax[0].plot(Ef, af, '-', lw=1.5)
-        ax[0].plot(E, a, 'o', ms=3)
+        ax[0].plot(Ef, af, '-', lw=1.5); ax[0].plot(E, a, 'o', ms=3)
         ax[0].axhline(bc, color='r', ls='--', lw=1, label=f"$\\beta_{{1c}}$={bc:.3f}")
-        ax[0].axvline(Elo, color='gray', ls=':'); ax[0].axvline(Ehi, color='gray', ls=':')
+        if bimodal:
+            ax[0].axvline(Elo, color='gray', ls=':'); ax[0].axvline(Ehi, color='gray', ls=':')
         ax[0].set_xlabel("E = S1"); ax[0].set_ylabel(r"$a_n(E)=\beta_{micro}$")
-        ax[0].set_title("DoS slope + Maxwell line"); ax[0].legend()
-        g = lnrho - bhi*Ef                     # most bimodal resolved beta
-        P = np.exp(g - g.max())
+        ax[0].set_title("DoS slope"); ax[0].legend()
+        g = lnrho - bc*Ef; P = np.exp(g - g.max())
         ax[1].fill_between(Ef, P, alpha=0.3); ax[1].plot(Ef, P, lw=1.5)
-        ax[1].set_xlabel("E = S1"); ax[1].set_ylabel(r"$P_\beta(E)$")
-        ax[1].set_title(f"reconstructed P (beta={bhi:.3f}, edge of coexistence band)")
+        ax[1].set_xlabel("E = S1"); ax[1].set_ylabel(r"$P_{\beta_{1c}}(E)$")
+        ax[1].set_title(f"P at beta1_c={bc:.3f}")
         plt.tight_layout(); plt.savefig(args.plot, dpi=110)
         print(f"plot -> {args.plot}")
 
