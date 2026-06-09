@@ -200,6 +200,30 @@ double rm_solve(double beta2, double Ewin, double hw, double a0,
   return a;
 }
 
+/* One ladder pass. dir=+1: hot start, walk down (Etop->Ebot); dir=-1: cold
+ * (frozen) start, walk up (Ebot->Etop). Disordering (the up pass) is entropically
+ * easy, so it reaches the frozen/gap windows the down pass stalls before -- the
+ * two passes meet in the gap. Pushes converged a_n into an[]; returns #reached. */
+int run_pass(int dir, double a0, double beta2, double Etop, double stepE,
+             double hw, unsigned K, unsigned NRM, int M,
+             std::vector<std::vector<double>> &an)
+{
+  if (dir > 0) for (unsigned i = 0; i < V*D; ++i) a[i] = (*randgrp)(rnd[0]);  // hot
+  else         for (unsigned i = 0; i < V*D; ++i) a[i] = id;                  // cold (frozen)
+  S1 = recompute_S1();
+  double a_prev = a0;
+  int reached = 0;
+  for (int s = 0; s < M; ++s) {
+    int n = (dir > 0) ? s : (M-1-s);
+    double Ewin = Etop - n*stepE, Elo = Ewin - hw, Ehi = Ewin + hw;
+    if (!seed_window(beta2, Elo, Ehi, a_prev)) break;   // stalled; rest unreached this pass
+    an[n].push_back(rm_solve(beta2, Ewin, hw, a_prev, K, NRM));
+    a_prev = an[n].back();                               // smooth guess for next window
+    ++reached;
+  }
+  return reached;
+}
+
 int main(int argc, char *argv[])
 {
   if (argc < 12) {
@@ -240,23 +264,9 @@ int main(int argc, char *argv[])
 
   for (unsigned r = 0; r < R; ++r) {
     for (unsigned i = 0; i < V; ++i) rnd[i].seed(iseed + r*1000003u + i);
-    for (unsigned i = 0; i < V*D; ++i) a[i] = (*randgrp)(rnd[0]);   // hot start
-    S1 = recompute_S1();
-    double a_prev = a0;
-    int reached = 0;
-    for (int n = 0; n < M; ++n) {
-      double Ewin = Etop - n*stepE, Elo = Ewin - hw, Ehi = Ewin + hw;
-      if (!seed_window(beta2, Elo, Ehi, a_prev)) {
-        printf("repeat %u: stop at window %d (Ewin=%.1f): seeding failed (S1=%.1f)\n",
-               r, n, Ewin, S1);
-        break;
-      }
-      double a_n = rm_solve(beta2, Ewin, hw, a_prev, K, NRM);
-      an[n].push_back(a_n);
-      a_prev = a_n;     // smooth initial guess for the next (lower) window
-      ++reached;
-    }
-    printf("repeat %u: reached %d / %d windows\n", r, reached, M);
+    int rd = run_pass(+1, a0, beta2, Etop, stepE, hw, K, NRM, M, an);   // hot,  down
+    int ru = run_pass(-1, a0, beta2, Etop, stepE, hw, K, NRM, M, an);   // cold, up
+    printf("repeat %u: down reached %d/%d, up reached %d/%d\n", r, rd, M, ru, M);
   }
 
   printf("\n# Ewin   a_n        sd        nrep\n");
