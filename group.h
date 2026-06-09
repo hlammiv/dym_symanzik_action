@@ -1,7 +1,7 @@
 #ifndef GROUP_H
 #define GROUP_H
 
-#define PMAX 1080
+#define PMAX 5040
 
 typedef int group_t;
 

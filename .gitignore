@@ -6,8 +6,13 @@ dym-mod-metroOG
 dym-mod-metro-savecfg
 dym-mod-mod-metro
 rect_test
+verify_group
 # NOTE: kentucky2nersc is a precompiled converter with no source in this tree,
 # so it is intentionally tracked (cannot be rebuilt from here).
+
+# --- Oversized group table (exceeds GitHub's 100 MB file limit) ---
+# Regenerate via groups/generators/genstowerpower_fast.py or re-copy from lenore.
+groups/siv_5040
 
 # --- Bulk simulation output & figures (regenerate from runs; too large for git) ---
 data/

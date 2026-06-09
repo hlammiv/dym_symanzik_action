@@ -18,7 +18,8 @@ continuous SU(3).
 
     *.c, *.cpp, *.h     Simulation core (C/C++)
     Makefile            Build (Makefile_mac for macOS)
-    groups/             Group multiplication tables, loaded at runtime
+    groups/             Group multiplication tables + generators (see groups/README.md)
+    verify_group.c      Standalone format checker for group files
     scripts/            Python analysis/plotting
     results/            Figures (PNG/PDF) and graph outputs      [git-ignored]
     data/               Raw Monte Carlo run logs                 [git-ignored]
@@ -44,6 +45,11 @@ continuous SU(3).
     make dym-mod-metro
 
 Builds with `-O3 -fopenmp`. Requires `g++` and OpenMP.
+
+The largest supported group order is `PMAX` in `group.h` (currently **5040**, to
+fit the SU(4) subgroups). The `mult` table is `PMAX²` ints but demand-paged, so a
+large `PMAX` costs nothing for small-group runs; bump it only to admit a bigger
+group. See `groups/README.md` for the group-file format and the full catalogue.
 
 ## Run
 
