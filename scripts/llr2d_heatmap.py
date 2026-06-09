@@ -53,43 +53,28 @@ def main():
     is_rect = args.obs in ("rect","chirect")
     is_chi  = args.obs in ("chi","chirect")
     Naction = (NRECT if is_rect else NPLAQ)
-
-    # reweight over a continuous interpolated rho (smooth moments) or raw cells.
-    cE1,cE2=cells[:,0],cells[:,1]
-    if args.smooth>0:
-        try:
-            from scipy.interpolate import griddata
-            g1=np.linspace(cE1.min(),cE1.max(),args.smooth)
-            g2=np.linspace(cE2.min(),cE2.max(),args.smooth)
-            G1,G2=np.meshgrid(g1,g2)
-            LR=griddata((cE1,cE2),lnrho,(G1,G2),method="linear")
-            m=~np.isnan(LR); E1=G1[m]; E2=G2[m]; LRv=LR[m]
-        except Exception as e:
-            print(f"(smooth off: {e})"); E1,E2,LRv=cE1,cE2,lnrho
-    else:
-        E1,E2,LRv=cE1,cE2,lnrho
-    S = E2 if is_rect else E1
+    h1=geo["step1"]/2.0; h2=geo["step2"]/2.0                  # non-overlapping tiles
 
     b1=np.linspace(0,args.b1max,args.n); b2=np.linspace(-args.b2lim,args.b2lim,args.n)
-    # first moment <S>(b1,b2) -- smooth in the couplings even from a coarse grid.
-    m1map=np.empty((args.n,args.n))
+    # CONTINUOUS-cell <S>: each cell is an exp-linear density over its tile (uses the
+    # measured gradient), integrated analytically -> the most accurate <S>(b1,b2).
+    Smap=np.empty((args.n,args.n))
     for ii,bb1 in enumerate(b1):
-        lw0=LRv-bb1*E1
         for jj,bb2 in enumerate(b2):
-            lw=lw0-bb2*E2; lw-=lw.max(); w=np.exp(lw)
-            m1map[jj,ii]=np.sum(S*w)/np.sum(w)
+            S1,_,S2,_ = R.cell_moments(cells,lnrho,h1,h2,bb1,bb2)
+            Smap[jj,ii]= S2 if is_rect else S1
     if is_chi:
-        # chi = -d<S>/d(its coupling) * V/Naction^2  (fluctuation-dissipation).
-        # We differentiate a LIGHTLY-SMOOTHED <S> rather than take the direct
-        # variance: the direct Var(S) over discrete cells is spiky (every pair of
-        # cells makes a pseudo-coexistence ridge), whereas <S> is smooth, so its
-        # derivative gives the clean susceptibility ridge.
+        # NOTE: the *direct* Var(S) (point-mass OR continuous-cell) facets -- a finite
+        # noisy cell set gives <S> tiny kinks that the variance amplifies into spurious
+        # pseudo-coexistence ridges, and that does NOT wash out with density/statistics.
+        # So chi = -d<S>/d(coupling) * V/N^2 from a lightly-smoothed <S>, which discards
+        # exactly those kinks and leaves the clean physical ridge.
         from scipy.ndimage import gaussian_filter
-        sm=gaussian_filter(m1map,sigma=args.chi_sigma)
+        sm=gaussian_filter(Smap,sigma=args.chi_sigma)
         d=np.gradient(sm,b2,axis=0) if is_rect else np.gradient(sm,b1,axis=1)
         phi=-d*Vsites/(Naction*Naction)
     else:
-        phi=m1map/(Naction*3.0)+1.0                          # 0=frozen, 1=disordered
+        phi=Smap/(Naction*3.0)+1.0                               # 0 frozen, 1 disordered
 
     # freezing line (steepest drop of <S1>), overlaid
     line=[(x,R.betac_steep(cells,lnrho,'b1',x,-args.b2lim,0.55)) for x in np.linspace(1.4,args.b1max,16)]
@@ -99,7 +84,7 @@ def main():
     plt.figure(figsize=(8,6))
     which = "rect" if is_rect else "plaq"
     if is_chi:
-        cc = "beta_1" if not is_rect else "beta_2"
+        cc = "beta_2" if is_rect else "beta_1"
         vmax=np.percentile(phi[phi>0],99.0) if np.any(phi>0) else None
         pc=plt.pcolormesh(b1,b2,phi,shading="auto",cmap="inferno",vmin=0,vmax=vmax)
         plt.colorbar(pc,label=rf"$\chi_{{{which}}} = -\partial\langle S\rangle/\partial\{cc}\cdot V/N^2$")

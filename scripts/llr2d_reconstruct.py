@@ -123,6 +123,47 @@ def S1mean(cells,lnrho,b1,b2):
     lw=lnrho-b1*E1-b2*E2; lw-=lw.max(); w=np.exp(lw)
     return np.sum(E1*w)/np.sum(w)
 
+# ---- continuous-cell moments (uses the per-cell GRADIENT, not just the value) ----
+# Each cell is a tile [E1+/-h1]x[E2+/-h2] over which lnrho varies LINEARLY with the
+# measured slope a=(a1,a2): rho = exp(lnrho_c + a1 u + a2 v). The Boltzmann-weighted
+# integral over the tile is then exp(linear), which integrates in closed form
+# (1D: \int_{-h}^{h} e^{p u} du = 2 sinh(ph)/p). So Z,<S>,<S^2> are exact sums over
+# cells of a CONTINUOUS density -> smooth moments, no point-mass / pairwise-ridge
+# faceting. ubar=<u>_tile and varu=Var(u)_tile per cell are stable closed forms.
+def _j0_ub_vu(p, h):
+    """For coefficient array p and tile half-width h, return logJ0=log(int e^{pu}du),
+    ubar=<u>, varu=Var(u) over u in [-h,h] with weight e^{pu}."""
+    p = np.asarray(p, float); s = p*h; a = np.abs(s)
+    logJ0 = np.empty_like(p); ub = np.empty_like(p); vu = np.empty_like(p)
+    small = a < 1e-3; large = a > 30.0; mid = ~(small | large)
+    # |ph| -> 0 : uniform tile (mean 0, var h^2/3)
+    logJ0[small] = np.log(2.0*h) + s[small]**2/6.0
+    ub[small]    = p[small]*h*h/3.0
+    vu[small]    = h*h/3.0
+    # moderate
+    sm = s[mid]; pm = p[mid]
+    logJ0[mid] = np.log(2.0) + np.log(np.sinh(sm)/pm)      # ratio is > 0
+    ub[mid]    = h/np.tanh(sm) - 1.0/pm
+    vu[mid]    = 1.0/(pm*pm) - h*h/(np.sinh(sm)**2)
+    # |ph| -> inf : mass piles at the high-exponent edge
+    sl = s[large]; pl = p[large]
+    logJ0[large] = a[large] - np.log(np.abs(pl))
+    ub[large]    = np.sign(pl)*h - 1.0/pl
+    vu[large]    = 1.0/(pl*pl)
+    return logJ0, ub, vu
+
+def cell_moments(cells, lnrho, h1, h2, b1, b2):
+    """Continuous <S1>,Var(S1),<S2>,Var(S2) at (b1,b2) from the tiled exp-linear rho."""
+    E1=cells[:,0]; E2=cells[:,1]; a1=cells[:,2]; a2=cells[:,3]
+    lJp, ub1, vu1 = _j0_ub_vu(a1-b1, h1)
+    lJq, ub2, vu2 = _j0_ub_vu(a2-b2, h2)
+    logW = lnrho - b1*E1 - b2*E2 + lJp + lJq
+    logW -= logW.max(); w = np.exp(logW); W = w.sum()
+    s1=E1+ub1; s1sq=E1*E1 + 2*E1*ub1 + (vu1+ub1*ub1)
+    s2=E2+ub2; s2sq=E2*E2 + 2*E2*ub2 + (vu2+ub2*ub2)
+    S1=np.sum(w*s1)/W; S2=np.sum(w*s2)/W
+    return S1, np.sum(w*s1sq)/W - S1*S1, S2, np.sum(w*s2sq)/W - S2*S2
+
 def betac_steep(cells,lnrho, fix, val, lo, hi, npts=500):
     """Steepest drop of <S1> over the full 2D reweight -- robust at small volume
     where the barrier is shallow (matches the 1D code's locator)."""
