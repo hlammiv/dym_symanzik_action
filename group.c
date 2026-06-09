@@ -6,7 +6,7 @@
 unsigned P;
 double ReTr[PMAX];
 double ImTr[PMAX];
-group_t mult[PMAX][PMAX];
+group_t **mult;   /* row pointers into a contiguous P*P block (see load_group) */
 group_t inv[PMAX];
 group_t id;
 
@@ -21,13 +21,22 @@ void load_group(const char *fn) {
 	 *  1x0 1x1 1x2 ...
 	 *  ...
 	 *
-	 * For a group of order P, there are thus 1 + P + P^2 entries. Whitespace is ignored.
+	 * For a group of order P there are 1 + 2P + P^2 tokens. Whitespace is ignored,
+	 * and any trailing tokens (e.g. appended matrices) are ignored.
 	 */
 	fscanf(fin, "%d", &P);
 	if (P > PMAX) {
 		fprintf(stderr, "Order of group too large: %d > %d\n", P, PMAX);
 		abort();
 	}
+
+	/* Allocate the Cayley table as one contiguous P*P block with P-stride rows,
+	 * so it stays cache-resident for small/medium groups regardless of PMAX. */
+	group_t *block = malloc((size_t)P * P * sizeof(group_t));
+	mult = malloc(P * sizeof(group_t *));
+	for (unsigned n = 0; n < P; n++)
+		mult[n] = block + (size_t)n * P;
+
 	for (unsigned n = 0; n < P; n++)
 		fscanf(fin, "%lf", &ReTr[n]);
         for (unsigned n = 0; n < P; n++)
