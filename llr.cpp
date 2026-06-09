@@ -1,22 +1,20 @@
 /*
- * LLR for discrete Yang-Mills -- MILESTONES 1-2
+ * LLR for discrete Yang-Mills -- MILESTONES 1-3
  * ============================================
- * Incremental energy tracking + single-window constrained Metropolis (m1) and a
- * Robbins-Monro solver for the LLR coefficient a_n (m2).
+ * m1: incremental energy (S1) tracking + single-window constrained Metropolis.
+ * m2: Robbins-Monro solver for the LLR coefficient a_n in a window.
+ * m3: tile the whole action range into overlapping windows and SEQUENTIALLY
+ *     SEED each window from the previous one's config, so deep (frozen) windows
+ *     that a hot-start drive-in cannot reach become reachable -- producing the
+ *     full a_n(E) curve.
  *
- * Energy:  E = S1 = sum over all plaquettes of ReTr U_plaq  (the beta1-conjugate
- * action). Constrained ensemble at window [Ewin +/- delta/2]:
- *     weight ~ exp(-a*S1 - beta2*S2),  restricted to S1 in [Elo, Ehi].
+ * Energy E = S1 = sum_plaq ReTr U_plaq. Constrained ensemble in window
+ * [Ewin +/- hw]: weight ~ exp(-a*S1 - beta2*S2) restricted to S1 in [Elo,Ehi].
+ * RM step (negated-trace convention, see m2): a += 12/(W^2 (m+1)) * (<S1>-Ewin),
+ * W = window width = 2*hw. a_n = d ln rho / dS1.
  *
- * RM iteration solves a_n so that <<dE>> = <S1> - Ewin = 0 (the reweighted
- * distribution becomes flat in the window, i.e. a_n = d ln rho / dS1):
- *     a^(m+1) = a^(m) + (12 / (delta^2 (m+1))) * (<S1>_a - Ewin).
- * NOTE the + sign: with the negated-trace convention S1 decreases as a grows,
- * so g = <S1> - Ewin has dg/da < 0 and the stable RM step adds g (verified by
- * g -> 0 in the trajectory output). [Paper Eq. 6 uses - with E >= 0.]
- *
- * Updates are SERIAL over sites (the window constraint is on the global S1).
- * Real LLR parallelism is over independent (interval x repeat) tasks, later.
+ * Output: "ANE: Ewin a_n sd nrep" lines (the input to milestone-4 reconstruction).
+ * Updates are serial over sites (the window constraint is global).
  */
 
 extern "C" {
@@ -32,16 +30,16 @@ extern "C" {
 #include "timer.h"
 
 #define NHIT 20
-
 typedef unsigned int uint;
 
 extern "C" void getpos(unsigned idx, unsigned int *pos);
 
 std::default_random_engine *rnd;
 std::vector<group_t> smallgroup;
-double S1;   // running plaquette action (the LLR energy)
+static std::uniform_int_distribution<> *randgrp;
+double S1;            // running plaquette action (LLR energy)
+double g_maxdrift = 0;
 
-/* From-scratch S1 = sum_{plaquettes} ReTr U_plaq (each plaquette once). */
 double recompute_S1()
 {
   double s = 0;
@@ -53,7 +51,6 @@ double recompute_S1()
   return s;
 }
 
-/* Plaquette staples touching link (i,d) (same as dym-mod-metro). */
 void get_staples(unsigned int i, unsigned int d, group_t* st)
 {
   unsigned int i1 = step(i, d, 1); int k=0;
@@ -71,7 +68,6 @@ void get_staples(unsigned int i, unsigned int d, group_t* st)
   }
 }
 
-/* Rectangle staples touching link (i,d) (same as dym-mod-metro). */
 void get_rect_loops(unsigned int i, unsigned int d, group_t* st)
 {
   unsigned int i1 = step(i, d, 1); int k=0;
@@ -133,8 +129,6 @@ void get_rect_loops(unsigned int i, unsigned int d, group_t* st)
   }
 }
 
-/* One serial sweep of the constrained update, maintaining S1 incrementally.
- * driveIn=true: greedily move S1 toward the window centre (init only). */
 void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
                         bool driveIn, long *hitp, long *accp)
 {
@@ -148,7 +142,6 @@ void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
   {
     group_t staples[2*(D-1)]; get_staples(i, d, staples);
     group_t rect[6*(D-1)];    get_rect_loops(i, d, rect);
-
     group_t b = a[i*D+d];
     double r1 = 0, m1 = 0;
     for (int j=0;j<nstaple;++j) r1 += ReTr[mult[b][staples[j]]];
@@ -160,9 +153,7 @@ void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
       double r1new = 0, m1new = 0;
       for (int j=0;j<nstaple;++j) r1new += ReTr[mult[bnew][staples[j]]];
       for (int k=0;k<nrect;  ++k) m1new += ReTr[mult[bnew][rect[k]]];
-
-      double dS1 = r1new - r1;
-      double S1new = S1 + dS1;
+      double dS1 = r1new - r1, S1new = S1 + dS1;
       bool accept = false;
       if (driveIn && (S1 < Elo || S1 > Ehi)) {
         accept = fabs(S1new - Emid) < fabs(S1 - Emid);
@@ -177,49 +168,65 @@ void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
   *hitp += lhit; *accp += lacc;
 }
 
-static std::uniform_int_distribution<> *randgrp;
-
-/* (Re)initialize a hot config and drive S1 into the window. Returns false if
- * the greedy drive-in could not reach the window (deep windows need sequential
- * seeding -- milestone 3). */
-bool init_into_window(double a_tilt, double beta2, double Elo, double Ehi)
+/* Drive the current config's S1 into [Elo,Ehi] (greedy). Works when the config
+ * starts within ~one window-step of the target (sequential seeding). */
+bool seed_window(double beta2, double Elo, double Ehi, double a_guess)
 {
-  for (unsigned i = 0; i < V*D; i++) a[i] = (*randgrp)(rnd[0]);
-  S1 = recompute_S1();
-  long h = 0, ac = 0; unsigned drive = 0, CAP = 20000;
+  long h=0, ac=0; unsigned drive=0, CAP=20000;
   while ((S1 < Elo || S1 > Ehi) && drive < CAP) {
-    update_constrained(a_tilt, beta2, Elo, Ehi, true, &h, &ac); ++drive;
+    update_constrained(a_guess, beta2, Elo, Ehi, true, &h, &ac); ++drive;
   }
   S1 = recompute_S1();
   return (S1 >= Elo && S1 <= Ehi);
 }
 
+/* RM-solve a_n in window centred at Ewin (config assumed already in-window). */
+double rm_solve(double beta2, double Ewin, double hw, double a0,
+                unsigned K, unsigned NRM)
+{
+  double Elo = Ewin - hw, Ehi = Ewin + hw, W = 2*hw, a = a0;
+  for (unsigned m = 0; m < NRM; ++m) {
+    double sum = 0; long hit = 0, acc = 0;
+    for (unsigned k = 0; k < K; ++k) {
+      update_constrained(a, beta2, Elo, Ehi, false, &hit, &acc);
+      sum += S1;
+    }
+    double g = sum/K - Ewin;
+    a += (12.0/(W*W*(m+1))) * g;
+    double drift = fabs(S1 - recompute_S1());
+    if (drift > g_maxdrift) g_maxdrift = drift;
+    S1 = recompute_S1();
+  }
+  return a;
+}
+
 int main(int argc, char *argv[])
 {
-  if (argc < 10) {
-    fprintf(stderr, "usage: %s group D Nt Nx beta2 Ewin delta a0 seed [K] [NRM] [R]\n", argv[0]);
+  if (argc < 12) {
+    fprintf(stderr, "usage: %s group D Nt Nx beta2 Etop Ebot step hw a0 seed [K] [NRM] [R]\n", argv[0]);
     return 1;
   }
   const char *groupfilename = argv[1];
   D  = atoi(argv[2]);  Nt = atoi(argv[3]);  Nx = atoi(argv[4]);
   beta2        = atof(argv[5]);
-  double Ewin  = atof(argv[6]);
-  double delta = atof(argv[7]);
-  double a0    = atof(argv[8]);
-  int iseed    = atoi(argv[9]);
-  unsigned K   = (argc > 10) ? (unsigned)atoi(argv[10]) : 200;   // sweeps / RM step
-  unsigned NRM = (argc > 11) ? (unsigned)atoi(argv[11]) : 400;   // RM iterations
-  unsigned R   = (argc > 12) ? (unsigned)atoi(argv[12]) : 1;     // repeats
-  double Elo = Ewin - delta/2, Ehi = Ewin + delta/2;
-  printf("LLR-m2(grp,D,Nt,Nx,beta2,Ewin,delta,a0,seed,K,NRM,R): %s %d %d %d %g %g %g %g %d %u %u %u\n",
-         groupfilename, D, Nt, Nx, beta2, Ewin, delta, a0, iseed, K, NRM, R);
-  printf("window S1 in [%.3f, %.3f]\n", Elo, Ehi);
+  double Etop  = atof(argv[6]);   // highest (disordered) window centre
+  double Ebot  = atof(argv[7]);   // lowest (frozen) window centre
+  double stepE = atof(argv[8]);   // spacing between window centres (>0)
+  double hw    = atof(argv[9]);   // window half-width (overlap if hw > stepE/2)
+  double a0    = atof(argv[10]);
+  int iseed    = atoi(argv[11]);
+  unsigned K   = (argc > 12) ? (unsigned)atoi(argv[12]) : 50;
+  unsigned NRM = (argc > 13) ? (unsigned)atoi(argv[13]) : 80;
+  unsigned R   = (argc > 14) ? (unsigned)atoi(argv[14]) : 1;
+
+  int M = (int)((Etop - Ebot)/stepE + 0.5) + 1;
+  printf("LLR-m3(grp,D,Nt,Nx,beta2): %s %d %d %d %g | Etop=%g Ebot=%g step=%g hw=%g a0=%g seed=%d K=%u NRM=%u R=%u | %d windows\n",
+         groupfilename, D, Nt, Nx, beta2, Etop, Ebot, stepE, hw, a0, iseed, K, NRM, R, M);
 
   V = Nt; for (unsigned d = 1; d < D; ++d) V *= Nx;
   rnd = new std::default_random_engine[V];
   load_group(groupfilename);
   static std::uniform_int_distribution<> rg(0, P-1); randgrp = &rg;
-
   double min_retr = 0, nn_retr = 10;
   for (uint i = 0; i < P; ++i) if (ReTr[i] < min_retr) min_retr = ReTr[i];
   for (uint i = 0; i < P; ++i) if (ReTr[i] > min_retr && ReTr[i] < nn_retr) nn_retr = ReTr[i];
@@ -227,54 +234,40 @@ int main(int argc, char *argv[])
   a = (group_t*) malloc(sizeof(*a) * V * D);
   for (unsigned i = 0; i < V; ++i) rnd[i].seed(iseed + i);
   step(0, 0, 1);
-  printf("small group size: %lu\n\n", smallgroup.size());
 
-  const double coef0 = 12.0/(delta*delta);
-  std::vector<double> a_finals;
-  double maxdrift = 0;
+  std::vector<std::vector<double>> an(M);   // an[n] = a_n samples over repeats
 
-  for (unsigned r = 0; r < R; ++r)
-  {
+  for (unsigned r = 0; r < R; ++r) {
     for (unsigned i = 0; i < V; ++i) rnd[i].seed(iseed + r*1000003u + i);
-    if (!init_into_window(a0, beta2, Elo, Ehi)) {
-      printf("repeat %u: drive-in failed to reach window (S1=%.3f) -- skipping\n", r, S1);
-      continue;
-    }
-
-    double a = a0;
-    printf("repeat %u: RM trajectory (m, a, <S1>, g=<S1>-Ewin, acc)\n", r);
-    for (unsigned m = 0; m < NRM; ++m)
-    {
-      double sum = 0; long hit = 0, acc = 0;
-      for (unsigned k = 0; k < K; ++k) {
-        update_constrained(a, beta2, Elo, Ehi, false, &hit, &acc);
-        sum += S1;
+    for (unsigned i = 0; i < V*D; ++i) a[i] = (*randgrp)(rnd[0]);   // hot start
+    S1 = recompute_S1();
+    double a_prev = a0;
+    int reached = 0;
+    for (int n = 0; n < M; ++n) {
+      double Ewin = Etop - n*stepE, Elo = Ewin - hw, Ehi = Ewin + hw;
+      if (!seed_window(beta2, Elo, Ehi, a_prev)) {
+        printf("repeat %u: stop at window %d (Ewin=%.1f): seeding failed (S1=%.1f)\n",
+               r, n, Ewin, S1);
+        break;
       }
-      double meanS1 = sum/K, g = meanS1 - Ewin;
-      a += (coef0/(m+1)) * g;                    // Robbins-Monro step (see header)
-
-      double drift = fabs(S1 - recompute_S1());  // ongoing m1 sanity check
-      if (drift > maxdrift) maxdrift = drift;
-      S1 = recompute_S1();
-
-      if (m < 6 || (m+1)%50 == 0 || m == NRM-1)
-        printf("  %4u  a=%.5f  <S1>=%9.3f  g=%+8.3f  acc=%.3f\n",
-               m, a, meanS1, g, hit ? (double)acc/hit : 0.0);
+      double a_n = rm_solve(beta2, Ewin, hw, a_prev, K, NRM);
+      an[n].push_back(a_n);
+      a_prev = a_n;     // smooth initial guess for the next (lower) window
+      ++reached;
     }
-    a_finals.push_back(a);
-    printf("repeat %u: converged a_n = %.5f\n\n", r, a);
+    printf("repeat %u: reached %d / %d windows\n", r, reached, M);
   }
 
-  printf("=== result ===\n");
-  if (a_finals.empty()) { printf("no successful repeats\n"); }
-  else {
-    double mean = 0; for (double x : a_finals) mean += x; mean /= a_finals.size();
-    double var = 0; for (double x : a_finals) var += (x-mean)*(x-mean);
-    double sd = a_finals.size()>1 ? sqrt(var/(a_finals.size()-1)) : 0.0;
-    printf("window Ewin=%.3f delta=%.3f : a_n = %.5f +/- %.5f  (%lu repeats)\n",
-           Ewin, delta, mean, sd, a_finals.size());
+  printf("\n# Ewin   a_n        sd        nrep\n");
+  for (int n = 0; n < M; ++n) {
+    double Ewin = Etop - n*stepE;
+    if (an[n].empty()) { printf("ANE: %8.2f   --(unreached)\n", Ewin); continue; }
+    double mean = 0; for (double x : an[n]) mean += x; mean /= an[n].size();
+    double var = 0; for (double x : an[n]) var += (x-mean)*(x-mean);
+    double sd = an[n].size()>1 ? sqrt(var/(an[n].size()-1)) : 0.0;
+    printf("ANE: %8.2f  %9.5f  %9.5f  %lu\n", Ewin, mean, sd, an[n].size());
   }
-  printf("max |incr - recompute| S1 over RM steps : %.3e\n", maxdrift);
+  printf("max |incr - recompute| S1 : %.3e\n", g_maxdrift);
 
   free(a); delete[] rnd;
   return 0;
