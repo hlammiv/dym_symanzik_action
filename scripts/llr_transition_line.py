@@ -53,8 +53,8 @@ def main():
     if args.plot:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
         fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-        ax[0].plot(bx, [fo[b] for b in bx], 'o-', ms=6)
-        ax[0].set_xlabel(r'$\beta_2$'); ax[0].set_ylabel(r'$\beta_{1c}$')
+        ax[0].plot([fo[b] for b in bx], bx, 'o-', ms=6)   # beta1_c on x, beta2 on y
+        ax[0].set_xlabel(r'$\beta_{1c}$'); ax[0].set_ylabel(r'$\beta_2$')
         ax[0].set_title('freezing line')
         db = sorted(dE)
         ax[1].plot(db, [dE[b] for b in db], 's-', ms=6, color='green')
