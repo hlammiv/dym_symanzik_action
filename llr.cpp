@@ -315,10 +315,10 @@ int main(int argc, char *argv[])
   for (unsigned i = 0; i < V*D; ++i) a[i] = (*randgrp)(rnd[0]);
   step(0, 0, 1);
   calibrate_rect_mult();                  // fixes RECT_MULT so dS2 = d(recompute_S2)
-  if (AXIS == 2)
-    printf("WARNING: axis=2 not yet valid -- the global S2 normalization is\n"
-           "  provisional (get_rect_loops rectangle multiplicity is config-dependent,\n"
-           "  RECT_MULT != integer), so the S2 window is misplaced. WIP.\n");
+  if (AXIS == 2 && fabs(RECT_MULT - 6.0) > 1e-3)
+    printf("WARNING: RECT_MULT=%.3f != 6 -- the 1x2 rectangles wrap on this lattice\n"
+           "  (extent too small in some direction); the S2 action is degenerate and the\n"
+           "  S2 window is invalid. Use a lattice with extent >= 3 for axis=2.\n", RECT_MULT);
 
   std::vector<std::vector<double>> an(M);   // an[n] = a_n samples over repeats
 
