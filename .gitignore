@@ -7,6 +7,7 @@ dym-mod-metro-savecfg
 dym-mod-mod-metro
 rect_test
 verify_group
+llr
 # NOTE: kentucky2nersc is a precompiled converter with no source in this tree,
 # so it is intentionally tracked (cannot be rebuilt from here).
 
