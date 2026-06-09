@@ -244,10 +244,15 @@ int main(int argc, char *argv[]) {
 	printf("min_retr: %e nn_retr: %e \n", min_retr, nn_retr);
 	printf("small group size: %lu\n", smallgroup.size());
 
-	/* Initialize the gauge field to a random ("hot") start. */
+	/* Initial gauge field: hot (random, default) or cold (all identity).
+	 * argv[12] = "cold" forces the ordered start -- running hot vs cold at the
+	 * same coupling brackets a first-order line by hysteresis. */
+	const char *startkind = (argc > 12) ? argv[12] : "hot";
+	bool coldstart = (startkind[0] == 'c' || startkind[0] == 'C');
+	printf("START: %s\n", coldstart ? "cold" : "hot");
 	a = (group_t*) malloc(sizeof(*a) * V * D);
 	for (unsigned i = 0; i < V*D; i++)
-		a[i] = randgrp(rnd[0]);
+		a[i] = coldstart ? id : randgrp(rnd[0]);
 
 	step(0, 0, 1);   // prime the nearest-neighbour table
 
@@ -285,6 +290,18 @@ int main(int argc, char *argv[]) {
 			simpleplaq += ReTr[plaquette(i, d1, d2)];
 		simpleplaq /= V*D*(D-1)/2;
 
+		/* Mean rectangle ReTr over all V*D*(D-1) oriented 1x2 rectangles --
+		 * the S2/beta2 order parameter (ordered -> 3, disordered -> ~0). Lets us
+		 * see whether plaquette and rectangle order at the same coupling (one
+		 * transition) or at different couplings (split/intermediate phase). */
+		double simplerect = 0;
+#pragma omp parallel for reduction(+: simplerect)
+		for (unsigned int i = 0; i < V; ++i)
+		for (unsigned int d1 = 0; d1 < D; ++d1)
+		for (unsigned int d2 = 0; d2 < D; ++d2)
+			if (d1 != d2) simplerect += ReTr[wilson(i, d1, d2, 2, 1)];
+		simplerect /= V*D*(D-1);
+
 		/* Nx x Nt grid of (spatial x temporal) Wilson loops. */
 		double wloop[Nx][Nt];
 		for (unsigned int k = 0; k < Nx; ++k)
@@ -306,6 +323,8 @@ int main(int argc, char *argv[]) {
 		for (unsigned int l = 0; l < Nt; ++l)
 			printf(" %e", wloop[k][l]);
 		printf("\n");
+		/* RMES: <mean plaquette ReTr> <mean rectangle ReTr> (both 0..3). */
+		printf("RMES: %e %e\n", simpleplaq, simplerect);
 		fflush(stdout);
 		printf("ACC: %f\n", ((double)acc)/hit);
 		tm.stop();

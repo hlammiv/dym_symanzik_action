@@ -8,6 +8,7 @@ dym-mod-metro: dym-mod-metro.cpp lattice.o group.o timer.o
 dym-mod-metro-savecfg: dym-mod-metro-savecfg.cpp lattice.o group.o timer.o
 dym-mod-metroOG: dym-mod-metroOG.cpp lattice.o group.o timer.o
 llr: llr.cpp lattice.o group.o timer.o
+llr2d: llr2d.cpp lattice.o group.o timer.o
 
 # Group-file format checker (uses the real load_group from group.o)
 verify_group: verify_group.c group.o
