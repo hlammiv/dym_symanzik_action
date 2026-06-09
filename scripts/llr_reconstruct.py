@@ -32,6 +32,15 @@ def parse(fname):
     o = np.argsort(E)                 # ascending E (frozen -> disordered)
     return E[o], a[o], nplaq
 
+def smooth(a, w=3):
+    """Light moving-average to suppress single-point noise at the frozen floor
+    (the deepest windows are under-resolved and occasionally spike)."""
+    if w <= 1 or len(a) < w: return a
+    k = w//2; s = a.astype(float).copy()
+    for i in range(len(a)):
+        s[i] = np.mean(a[max(0,i-k):min(len(a),i+k+1)])
+    return s
+
 def reconstruct(E, a, npts=4000):
     Ef = np.linspace(E[0], E[-1], npts)
     af = np.interp(Ef, E, a)
@@ -78,12 +87,14 @@ def main():
     ap.add_argument("file", nargs="?", default="-")
     ap.add_argument("--nplaq", type=int, default=None)
     ap.add_argument("--plot", default=None)
+    ap.add_argument("--smooth", type=int, default=3, help="moving-average window on a_n (1=off)")
     args = ap.parse_args()
 
     E, a, nplaq = parse(args.file)
     if args.nplaq: nplaq = args.nplaq
     if len(E) < 3:
         sys.exit("need >=3 reached windows")
+    a = smooth(a, args.smooth)
 
     Ef, af, lnrho = reconstruct(E, a)
     res = find_betac(Ef, lnrho, a)
