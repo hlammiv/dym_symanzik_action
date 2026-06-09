@@ -24,3 +24,7 @@ results/
 .*.swp
 *.swp
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
