@@ -38,8 +38,26 @@ def parse(fname):
             if m: geo["E1top"]=float(m.group(1)); geo["E1bot"]=float(m.group(2))
         if l.startswith("ANE2:"):
             t=l.split()
-            cells.append([float(t[1]),float(t[2]),float(t[3]),float(t[4])])
+            a1,a2=float(t[3]),float(t[4])
+            # drop diverged cells (RM blew up at the edge of support; physical |a|<~1)
+            if not (np.isfinite(a1) and np.isfinite(a2) and abs(a1)<5 and abs(a2)<5):
+                continue
+            cells.append([float(t[1]),float(t[2]),a1,a2])
     return np.array(cells), geo
+
+def parse_multi(files):
+    """Combine several independent runs: average each cell's gradient (a1,a2)
+    over all runs that reached it (cells keyed by their (E1,E2) centre)."""
+    geo=None; acc={}
+    for f in files:
+        cells,g=parse(f)
+        if geo is None: geo=g
+        for E1,E2,a1,a2 in cells:
+            acc.setdefault((round(E1,1),round(E2,1)),[]).append((a1,a2))
+    out=[]
+    for (E1,E2),lst in acc.items():
+        arr=np.array(lst); out.append([E1,E2,arr[:,0].mean(),arr[:,1].mean()])
+    return np.array(out), geo, {k:len(v) for k,v in acc.items()}
 
 def grid_index(cells, geo):
     """Assign (i,j): i from E1, j from E2 offset off the ridge."""
@@ -114,9 +132,15 @@ def betac_steep(cells,lnrho, fix, val, lo, hi, npts=500):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("file"); ap.add_argument("--plot",default=None)
+    ap.add_argument("file",nargs="+"); ap.add_argument("--plot",default=None)
     args=ap.parse_args()
-    cells,geo=parse(args.file)
+    if len(args.file)==1:
+        cells,geo=parse(args.file[0])
+        print(f"1 run, {len(cells)} cells")
+    else:
+        cells,geo,nrep=parse_multi(args.file)
+        print(f"{len(args.file)} runs combined -> {len(cells)} unique cells "
+              f"(reached x{min(nrep.values())}..{max(nrep.values())})")
     idx=grid_index(cells,geo)
     lnrho=integrate(cells,idx)
     print(f"cells: {len(cells)}   E1 {cells[:,0].min():.0f}..{cells[:,0].max():.0f}   E2 {cells[:,1].min():.0f}..{cells[:,1].max():.0f}")
