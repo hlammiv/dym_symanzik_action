@@ -30,6 +30,7 @@ extern "C" {
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include <vector>
 #include <random>
@@ -257,10 +258,41 @@ void rm_solve2d(double E1,double E2,double hw1,double hw2,
   *a1_out = a1; *a2_out = a2;
 }
 
+/* ---- config I/O (for process-based parallel-over-cells: "level 2") ---- */
+void save_cfg(const char *p) {
+  FILE *f = fopen(p, "wb");
+  if (f) { fwrite(a, sizeof(*a), (size_t)V*D, f); fclose(f); }
+}
+bool load_cfg(const char *p) {
+  FILE *f = fopen(p, "rb");
+  if (!f) return false;
+  size_t n = fread(a, sizeof(*a), (size_t)V*D, f); fclose(f);
+  return n == (size_t)V*D;
+}
+
+/* Common lattice setup: group tables, proposal pool, hot config, RECT_MULT. */
+void setup_lattice(const char *grp, int iseed)
+{
+  rnd = new std::default_random_engine[V];
+  load_group(grp);
+  static std::uniform_int_distribution<> rg(0, P-1); randgrp = &rg;
+  double min_retr = 0, nn_retr = 10;
+  for (uint i=0;i<P;++i) if (ReTr[i]<min_retr) min_retr=ReTr[i];
+  for (uint i=0;i<P;++i) if (ReTr[i]>min_retr && ReTr[i]<nn_retr) nn_retr=ReTr[i];
+  for (uint i=0;i<P;++i) if (ReTr[i]<nn_retr+1e-6 && ReTr[i]>min_retr) smallgroup.push_back(i);
+  a = (group_t*) malloc(sizeof(*a)*V*D);
+  for (unsigned i=0;i<V;++i) rnd[i].seed(iseed+i);
+  for (unsigned i=0;i<V*D;++i) a[i] = (*randgrp)(rnd[0]);
+  step(0,0,1);
+  calibrate_rect_mult();
+  if (fabs(RECT_MULT-6.0) > 1e-3)
+    printf("WARNING: RECT_MULT=%.3f != 6 -- rectangles wrap; need lattice extent >= 3\n", RECT_MULT);
+}
+
 /* ---- cell grid: a band around the curved ridge E2 = c0+c1*E1+c2*E1^2 ---- */
 struct Cell { double E1, E2; std::vector<double> a1s, a2s; bool reached=false; };
 
-int main(int argc, char *argv[])
+int mode_full(int argc, char *argv[])
 {
   if (argc < 18) {
     fprintf(stderr,
@@ -288,20 +320,7 @@ int main(int argc, char *argv[])
          grp,D,Nt,Nx,E1top,E1bot,step1,hw1,c0,c1,c2,step2,hw2,nperp,a0,iseed,K,NRM,R,N1,N2);
   V = Nt; for (unsigned d=1; d<D; ++d) V *= Nx;
   printf("NPLAQ: %u\nNRECT: %u\n", V*D*(D-1)/2, V*D*(D-1));
-  rnd = new std::default_random_engine[V];
-  load_group(grp);
-  static std::uniform_int_distribution<> rg(0,P-1); randgrp=&rg;
-  double min_retr=0, nn_retr=10;
-  for (uint i=0;i<P;++i) if (ReTr[i]<min_retr) min_retr=ReTr[i];
-  for (uint i=0;i<P;++i) if (ReTr[i]>min_retr && ReTr[i]<nn_retr) nn_retr=ReTr[i];
-  for (uint i=0;i<P;++i) if (ReTr[i]<nn_retr+1e-6 && ReTr[i]>min_retr) smallgroup.push_back(i);
-  a = (group_t*) malloc(sizeof(*a)*V*D);
-  for (unsigned i=0;i<V;++i) rnd[i].seed(iseed+i);
-  for (unsigned i=0;i<V*D;++i) a[i] = (*randgrp)(rnd[0]);
-  step(0,0,1);
-  calibrate_rect_mult();
-  if (fabs(RECT_MULT-6.0) > 1e-3)
-    printf("WARNING: RECT_MULT=%.3f != 6 -- rectangles wrap; need lattice extent >= 3\n", RECT_MULT);
+  setup_lattice(grp, iseed);
 
   // grid[i][j]: E1 = E1top - i*step1 ; E2 = RIDGE(E1) + (j-nperp)*step2
   std::vector<std::vector<Cell>> grid(N1, std::vector<Cell>(N2));
@@ -384,4 +403,116 @@ int main(int argc, char *argv[])
   printf("max |incr-recompute|: S1 %.3e  S2 %.3e\n", g_drift1, g_drift2);
   free(a); delete[] rnd;
   return 0;
+}
+
+/* ============================ LEVEL-2 PARALLELISM ============================
+ * Split the single-run cost across processes: a cheap SEQUENTIAL seeding pass
+ * drives a config into every cell and dumps it to disk (+ a manifest); then N
+ * independent SOLVE workers each load a disjoint range of cells and run the
+ * (expensive) RM in parallel. Equivalent to mode_full -- rm_solve2d starts from
+ * the drive-in config either way -- but the RM now parallelizes over cells.
+ * ========================================================================== */
+
+/* seed: drive-in every reachable cell (bidirectional ridge walk), save its
+ * config, and emit a manifest "CELL: idx i j E1 E2 hw1 hw2 path" on stdout. */
+int mode_seed(int argc, char *argv[])
+{
+  if (argc < 18) {
+    fprintf(stderr, "usage: %s seed group D Nt Nx E1top E1bot step1 hw1 c0 c1 c2 step2 hw2 nperp a0 seed cfgdir\n", argv[0]);
+    return 1;
+  }
+  const char *grp=argv[1];
+  D=atoi(argv[2]); Nt=atoi(argv[3]); Nx=atoi(argv[4]);
+  double E1top=atof(argv[5]),E1bot=atof(argv[6]),step1=atof(argv[7]),hw1=atof(argv[8]);
+  double c0=atof(argv[9]),c1=atof(argv[10]),c2=atof(argv[11]);
+  double step2=atof(argv[12]),hw2=atof(argv[13]);
+  int nperp=atoi(argv[14]);
+  double a0=atof(argv[15]);
+  int iseed=atoi(argv[16]);
+  const char *cfgdir=argv[17];
+  int N1=(int)((E1top-E1bot)/step1+0.5)+1, N2=2*nperp+1;
+  V=Nt; for(unsigned d=1;d<D;++d) V*=Nx;
+  printf("LLR2D(seed): %s %d %d %d | E1=[%g,%g] step1=%g hw1=%g | ridge c0=%g c1=%g c2=%g step2=%g hw2=%g nperp=%d\n",
+         grp,D,Nt,Nx,E1top,E1bot,step1,hw1,c0,c1,c2,step2,hw2,nperp);
+  setup_lattice(grp, iseed);
+
+  std::vector<std::vector<Cell>> grid(N1, std::vector<Cell>(N2));
+  std::vector<std::vector<bool>> saved(N1, std::vector<bool>(N2,false));
+  for(int i=0;i<N1;++i) for(int j=0;j<N2;++j){
+    double E1=E1top-i*step1; grid[i][j].E1=E1; grid[i][j].E2=c0+c1*E1+c2*E1*E1+(j-nperp)*step2;
+  }
+  const unsigned CAP=4000; int idx=0; char path[1024];
+  auto try_save=[&](int i,int j){
+    Cell&c=grid[i][j];
+    if(saved[i][j]) return;
+    if(!(S1>=c.E1-hw1&&S1<=c.E1+hw1&&S2>=c.E2-hw2&&S2<=c.E2+hw2)) return;
+    snprintf(path,sizeof(path),"%s/cell_%d_%d.cfg",cfgdir,i,j);
+    save_cfg(path); saved[i][j]=true;
+    printf("CELL: %d %d %d %.2f %.2f %.2f %.2f %s\n", idx++,i,j,c.E1,c.E2,hw1,hw2,path);
+  };
+  auto fan=[&](int i){
+    std::vector<group_t> ridgecfg(a,a+V*D);
+    for(int dir=-1;dir<=1;dir+=2) for(int t=1;t<=nperp;++t){
+      int j=nperp+dir*t; Cell&c=grid[i][j];
+      for(unsigned q=0;q<V*D;++q) a[q]=ridgecfg[q]; resync_E();
+      if(!seed_cell(c.E1-hw1,c.E1+hw1,c.E2-hw2,c.E2+hw2,a0,a0,CAP)) break;
+      try_save(i,j);
+    }
+    for(unsigned q=0;q<V*D;++q) a[q]=ridgecfg[q]; resync_E();
+  };
+  // cold pass (frozen -> disordered)
+  for(unsigned q=0;q<V*D;++q) a[q]=id; resync_E();
+  for(int s=0;s<N1;++s){ int i=N1-1-s; Cell&cc=grid[i][nperp];
+    if(!seed_cell(cc.E1-hw1,cc.E1+hw1,cc.E2-hw2,cc.E2+hw2,a0,a0,CAP)) continue;
+    try_save(i,nperp); fan(i); }
+  // hot pass (disordered -> frozen)
+  for(unsigned q=0;q<V*D;++q) a[q]=(*randgrp)(rnd[0]); resync_E();
+  for(int i=0;i<N1;++i){ Cell&cc=grid[i][nperp];
+    if(!seed_cell(cc.E1-hw1,cc.E1+hw1,cc.E2-hw2,cc.E2+hw2,a0,a0,CAP)) continue;
+    try_save(i,nperp); fan(i); }
+  fprintf(stderr,"SEED: saved %d cells to %s\n", idx, cfgdir);
+  free(a); delete[] rnd; return 0;
+}
+
+/* solve: load cells [lo,hi) from the manifest and RM-solve each (parallel-safe:
+ * independent processes, disjoint cell ranges). Emits ANE2 lines. */
+int mode_solve(int argc, char *argv[])
+{
+  if (argc < 12) {
+    fprintf(stderr, "usage: %s solve group D Nt Nx manifest lo hi a0 K NRM seed\n", argv[0]);
+    return 1;
+  }
+  const char *grp=argv[1];
+  D=atoi(argv[2]); Nt=atoi(argv[3]); Nx=atoi(argv[4]);
+  const char *manifest=argv[5];
+  int lo=atoi(argv[6]), hi=atoi(argv[7]);
+  double a0=atof(argv[8]);
+  unsigned K=(unsigned)atoi(argv[9]), NRM=(unsigned)atoi(argv[10]);
+  int iseed=atoi(argv[11]);
+  V=Nt; for(unsigned d=1;d<D;++d) V*=Nx;
+  setup_lattice(grp, iseed);
+  FILE *mf=fopen(manifest,"r");
+  if(!mf){ fprintf(stderr,"solve: cannot open manifest %s\n",manifest); return 1; }
+  char line[2048]; int done=0;
+  while(fgets(line,sizeof(line),mf)){
+    if(strncmp(line,"CELL:",5)) continue;
+    int idx,i,j; double E1,E2,hw1,hw2; char path[1024];
+    if(sscanf(line,"CELL: %d %d %d %lf %lf %lf %lf %1023s",&idx,&i,&j,&E1,&E2,&hw1,&hw2,path)!=8) continue;
+    if(idx<lo||idx>=hi) continue;
+    if(!load_cfg(path)){ fprintf(stderr,"solve: missing cfg %s\n",path); continue; }
+    resync_E();
+    double b1,b2; rm_solve2d(E1,E2,hw1,hw2,a0,a0,K,NRM,&b1,&b2);
+    printf("ANE2: %9.2f %9.2f %10.6f %10.6f %9.5f %9.5f %d\n", E1,E2,b1,b2,0.0,0.0,1);
+    fflush(stdout); ++done;
+  }
+  fclose(mf);
+  fprintf(stderr,"SOLVE[%d,%d): %d cells, drift S1 %.3e S2 %.3e\n", lo,hi,done,g_drift1,g_drift2);
+  free(a); delete[] rnd; return 0;
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc > 1 && strcmp(argv[1],"seed")==0)  return mode_seed (argc-1, argv+1);
+  if (argc > 1 && strcmp(argv[1],"solve")==0) return mode_solve(argc-1, argv+1);
+  return mode_full(argc, argv);   // default: single-process full grid
 }
