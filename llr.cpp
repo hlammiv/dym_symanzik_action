@@ -224,6 +224,7 @@ int main(int argc, char *argv[])
          groupfilename, D, Nt, Nx, beta2, Etop, Ebot, stepE, hw, a0, iseed, K, NRM, R, M);
 
   V = Nt; for (unsigned d = 1; d < D; ++d) V *= Nx;
+  printf("NPLAQ: %u\n", V*D*(D-1)/2);   // plaquettes, for <E> = S1/NPLAQ/3 + 1
   rnd = new std::default_random_engine[V];
   load_group(groupfilename);
   static std::uniform_int_distribution<> rg(0, P-1); randgrp = &rg;
