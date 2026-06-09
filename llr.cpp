@@ -1,28 +1,22 @@
 /*
- * LLR for discrete Yang-Mills -- MILESTONE 1
- * =========================================
- * Incremental energy tracking + a single-window constrained Metropolis update.
+ * LLR for discrete Yang-Mills -- MILESTONES 1-2
+ * ============================================
+ * Incremental energy tracking + single-window constrained Metropolis (m1) and a
+ * Robbins-Monro solver for the LLR coefficient a_n (m2).
  *
  * Energy:  E = S1 = sum over all plaquettes of ReTr U_plaq  (the beta1-conjugate
- * action). The rectangle term S2 (beta2-conjugate) enters only as a fixed
- * background in the sampling weight.
+ * action). Constrained ensemble at window [Ewin +/- delta/2]:
+ *     weight ~ exp(-a*S1 - beta2*S2),  restricted to S1 in [Elo, Ehi].
  *
- * Constrained ensemble at window [Elo, Ehi] = [Ewin - delta/2, Ewin + delta/2]:
- *     weight ~ exp(-a*S1 - beta2*S2),  restricted to S1 in [Elo, Ehi]
- * where `a` is the LLR tilt that replaces beta1 (Robbins-Monro will solve for it
- * later; here it is a fixed input).
+ * RM iteration solves a_n so that <<dE>> = <S1> - Ewin = 0 (the reweighted
+ * distribution becomes flat in the window, i.e. a_n = d ln rho / dS1):
+ *     a^(m+1) = a^(m) + (12 / (delta^2 (m+1))) * (<S1>_a - Ewin).
+ * NOTE the + sign: with the negated-trace convention S1 decreases as a grows,
+ * so g = <S1> - Ewin has dg/da < 0 and the stable RM step adds g (verified by
+ * g -> 0 in the trajectory output). [Paper Eq. 6 uses - with E >= 0.]
  *
- * A local link move changes S1 by exactly dS1 = r1new - r1 (the change of the
- * plaquettes touching that link), so S1 is maintained incrementally instead of
- * recomputed globally. This file's job is to verify two things:
- *   (1) the incremental S1 matches a from-scratch global recompute, and
- *   (2) the constrained update confines S1 to the window -- including a window
- *       placed inside the first-order coexistence gap that unconstrained runs
- *       never reach.
- *
- * Updates here are SERIAL over sites: the window constraint is on the global S1,
- * so a checkerboard parallel sweep is not conditionally independent. (Real LLR
- * parallelism is over independent (interval x repeat) tasks, added later.)
+ * Updates are SERIAL over sites (the window constraint is on the global S1).
+ * Real LLR parallelism is over independent (interval x repeat) tasks, later.
  */
 
 extern "C" {
@@ -33,6 +27,7 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <vector>
 #include <random>
 #include "timer.h"
 
@@ -139,8 +134,7 @@ void get_rect_loops(unsigned int i, unsigned int d, group_t* st)
 }
 
 /* One serial sweep of the constrained update, maintaining S1 incrementally.
- * driveIn=true: when S1 is outside the window, greedily move it toward the
- * window centre (initialization only); once inside, the hard window applies. */
+ * driveIn=true: greedily move S1 toward the window centre (init only). */
 void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
                         bool driveIn, long *hitp, long *accp)
 {
@@ -170,12 +164,9 @@ void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
       double dS1 = r1new - r1;
       double S1new = S1 + dS1;
       bool accept = false;
-
       if (driveIn && (S1 < Elo || S1 > Ehi)) {
-        /* funnel toward the window (no detailed balance; init only) */
         accept = fabs(S1new - Emid) < fabs(S1 - Emid);
       } else if (S1new >= Elo && S1new <= Ehi) {
-        /* hard window + LLR tilt a on S1, beta2 background on S2 */
         double w = exp(-a_tilt*dS1 - beta2*(m1new - m1));
         accept = (w > rand01(rnd[i]));
       }
@@ -186,80 +177,104 @@ void update_constrained(double a_tilt, double beta2, double Elo, double Ehi,
   *hitp += lhit; *accp += lacc;
 }
 
+static std::uniform_int_distribution<> *randgrp;
+
+/* (Re)initialize a hot config and drive S1 into the window. Returns false if
+ * the greedy drive-in could not reach the window (deep windows need sequential
+ * seeding -- milestone 3). */
+bool init_into_window(double a_tilt, double beta2, double Elo, double Ehi)
+{
+  for (unsigned i = 0; i < V*D; i++) a[i] = (*randgrp)(rnd[0]);
+  S1 = recompute_S1();
+  long h = 0, ac = 0; unsigned drive = 0, CAP = 20000;
+  while ((S1 < Elo || S1 > Ehi) && drive < CAP) {
+    update_constrained(a_tilt, beta2, Elo, Ehi, true, &h, &ac); ++drive;
+  }
+  S1 = recompute_S1();
+  return (S1 >= Elo && S1 <= Ehi);
+}
+
 int main(int argc, char *argv[])
 {
   if (argc < 10) {
-    fprintf(stderr, "usage: %s group D Nt Nx beta2 Ewin delta a seed [K] [N]\n", argv[0]);
+    fprintf(stderr, "usage: %s group D Nt Nx beta2 Ewin delta a0 seed [K] [NRM] [R]\n", argv[0]);
     return 1;
   }
   const char *groupfilename = argv[1];
-  D  = atoi(argv[2]);
-  Nt = atoi(argv[3]);
-  Nx = atoi(argv[4]);
-  beta2       = atof(argv[5]);
-  double Ewin = atof(argv[6]);
-  double delta= atof(argv[7]);
-  double a_tilt = atof(argv[8]);
-  int iseed   = atoi(argv[9]);
-  unsigned K = (argc > 10) ? (unsigned)atoi(argv[10]) : 100;
-  unsigned N = (argc > 11) ? (unsigned)atoi(argv[11]) : 100;
+  D  = atoi(argv[2]);  Nt = atoi(argv[3]);  Nx = atoi(argv[4]);
+  beta2        = atof(argv[5]);
+  double Ewin  = atof(argv[6]);
+  double delta = atof(argv[7]);
+  double a0    = atof(argv[8]);
+  int iseed    = atoi(argv[9]);
+  unsigned K   = (argc > 10) ? (unsigned)atoi(argv[10]) : 200;   // sweeps / RM step
+  unsigned NRM = (argc > 11) ? (unsigned)atoi(argv[11]) : 400;   // RM iterations
+  unsigned R   = (argc > 12) ? (unsigned)atoi(argv[12]) : 1;     // repeats
   double Elo = Ewin - delta/2, Ehi = Ewin + delta/2;
-  printf("LLR-m1(grp,D,Nt,Nx,beta2,Ewin,delta,a,seed): %s %d %d %d %e %e %e %e %d\n",
-         groupfilename, D, Nt, Nx, beta2, Ewin, delta, a_tilt, iseed);
+  printf("LLR-m2(grp,D,Nt,Nx,beta2,Ewin,delta,a0,seed,K,NRM,R): %s %d %d %d %g %g %g %g %d %u %u %u\n",
+         groupfilename, D, Nt, Nx, beta2, Ewin, delta, a0, iseed, K, NRM, R);
   printf("window S1 in [%.3f, %.3f]\n", Elo, Ehi);
 
   V = Nt; for (unsigned d = 1; d < D; ++d) V *= Nx;
   rnd = new std::default_random_engine[V];
-  for (int i = 0; i < V; ++i) rnd[i].seed(iseed + i);
   load_group(groupfilename);
-  std::uniform_int_distribution<> randgrp(0, P-1);
+  static std::uniform_int_distribution<> rg(0, P-1); randgrp = &rg;
 
   double min_retr = 0, nn_retr = 10;
   for (uint i = 0; i < P; ++i) if (ReTr[i] < min_retr) min_retr = ReTr[i];
   for (uint i = 0; i < P; ++i) if (ReTr[i] > min_retr && ReTr[i] < nn_retr) nn_retr = ReTr[i];
   for (uint i = 0; i < P; ++i) if (ReTr[i] < nn_retr + 1e-6 && ReTr[i] > min_retr) smallgroup.push_back(i);
-  printf("small group size: %lu\n", smallgroup.size());
-
   a = (group_t*) malloc(sizeof(*a) * V * D);
-  for (unsigned i = 0; i < V*D; i++) a[i] = randgrp(rnd[0]);
+  for (unsigned i = 0; i < V; ++i) rnd[i].seed(iseed + i);
   step(0, 0, 1);
-  S1 = recompute_S1();
-  printf("hot-start S1 = %.3f  (plaquettes = %u)\n", S1, V*D*(D-1)/2);
+  printf("small group size: %lu\n\n", smallgroup.size());
 
-  /* Drive S1 into the window. */
-  long h0 = 0, a0 = 0;
-  unsigned drive = 0, DRIVE_CAP = 20000;
-  while ((S1 < Elo || S1 > Ehi) && drive < DRIVE_CAP) {
-    update_constrained(a_tilt, beta2, Elo, Ehi, true, &h0, &a0);
-    ++drive;
+  const double coef0 = 12.0/(delta*delta);
+  std::vector<double> a_finals;
+  double maxdrift = 0;
+
+  for (unsigned r = 0; r < R; ++r)
+  {
+    for (unsigned i = 0; i < V; ++i) rnd[i].seed(iseed + r*1000003u + i);
+    if (!init_into_window(a0, beta2, Elo, Ehi)) {
+      printf("repeat %u: drive-in failed to reach window (S1=%.3f) -- skipping\n", r, S1);
+      continue;
+    }
+
+    double a = a0;
+    printf("repeat %u: RM trajectory (m, a, <S1>, g=<S1>-Ewin, acc)\n", r);
+    for (unsigned m = 0; m < NRM; ++m)
+    {
+      double sum = 0; long hit = 0, acc = 0;
+      for (unsigned k = 0; k < K; ++k) {
+        update_constrained(a, beta2, Elo, Ehi, false, &hit, &acc);
+        sum += S1;
+      }
+      double meanS1 = sum/K, g = meanS1 - Ewin;
+      a += (coef0/(m+1)) * g;                    // Robbins-Monro step (see header)
+
+      double drift = fabs(S1 - recompute_S1());  // ongoing m1 sanity check
+      if (drift > maxdrift) maxdrift = drift;
+      S1 = recompute_S1();
+
+      if (m < 6 || (m+1)%50 == 0 || m == NRM-1)
+        printf("  %4u  a=%.5f  <S1>=%9.3f  g=%+8.3f  acc=%.3f\n",
+               m, a, meanS1, g, hit ? (double)acc/hit : 0.0);
+    }
+    a_finals.push_back(a);
+    printf("repeat %u: converged a_n = %.5f\n\n", r, a);
   }
-  if (S1 < Elo || S1 > Ehi)
-    printf("WARNING: failed to reach window in %u sweeps (S1=%.3f)\n", DRIVE_CAP, S1);
-  else
-    printf("reached window after %u drive-in sweeps (S1=%.3f)\n", drive, S1);
-  S1 = recompute_S1();   /* resync after drive-in */
 
-  /* Constrained sampling + verification. */
-  long hit = 0, acc = 0;
-  double sumS1 = 0, minS1 = 1e30, maxS1 = -1e30, maxdrift = 0;
-  int outside = 0;
-  for (unsigned n = 0; n < N; n++) {
-    for (unsigned k = 0; k < K; k++) update_constrained(a_tilt, beta2, Elo, Ehi, false, &hit, &acc);
-    double S1rec = recompute_S1();
-    double drift = fabs(S1 - S1rec);
-    if (drift > maxdrift) maxdrift = drift;
-    S1 = S1rec;                                  /* resync (report drift first) */
-    sumS1 += S1; if (S1 < minS1) minS1 = S1; if (S1 > maxS1) maxS1 = S1;
-    if (S1 < Elo - 1e-6 || S1 > Ehi + 1e-6) ++outside;
+  printf("=== result ===\n");
+  if (a_finals.empty()) { printf("no successful repeats\n"); }
+  else {
+    double mean = 0; for (double x : a_finals) mean += x; mean /= a_finals.size();
+    double var = 0; for (double x : a_finals) var += (x-mean)*(x-mean);
+    double sd = a_finals.size()>1 ? sqrt(var/(a_finals.size()-1)) : 0.0;
+    printf("window Ewin=%.3f delta=%.3f : a_n = %.5f +/- %.5f  (%lu repeats)\n",
+           Ewin, delta, mean, sd, a_finals.size());
   }
-
-  printf("\n=== verification ===\n");
-  printf("window           : [%.3f, %.3f]\n", Elo, Ehi);
-  printf("<S1>             : %.3f\n", sumS1/N);
-  printf("S1 range sampled : [%.3f, %.3f]  (must be within window)\n", minS1, maxS1);
-  printf("measurements out : %d / %u\n", outside, N);
-  printf("max |incr - recompute| over K-sweep blocks : %.3e\n", maxdrift);
-  printf("acceptance       : %.3f\n", hit ? (double)acc/hit : 0.0);
+  printf("max |incr - recompute| S1 over RM steps : %.3e\n", maxdrift);
 
   free(a); delete[] rnd;
   return 0;
