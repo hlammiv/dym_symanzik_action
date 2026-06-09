@@ -42,11 +42,11 @@ extern "C" {
 #include <random>
 #include "timer.h"
 
-#define K       1000   // decorrelation sweeps between measurements
-#define N       1000   // number of measurements
-#define NTHERM  0      // thermalization sweeps before the first measurement
-                       // !! currently 0 -- raise (e.g. to K) for production runs
-#define NHIT    20     // Metropolis hits per link per visit
+/* Defaults for the optional CLI sweep counts (override via argv 9/10/11). */
+#define K_DEFAULT       1000   // decorrelation sweeps between measurements
+#define N_DEFAULT       1000   // number of measurements
+#define NTHERM_DEFAULT  0      // thermalization sweeps before the first measurement
+#define NHIT            20     // Metropolis hits per link per visit
 
 typedef unsigned int uint;
 
@@ -199,7 +199,7 @@ void update()
 int main(int argc, char *argv[]) {
 	/* Theory parameters come from the command line. */
 	if (argc < 9) {
-		fprintf(stderr, "usage: %s group D Nt Nx beta0 beta1 beta2 seed\n", argv[0]);
+		fprintf(stderr, "usage: %s group D Nt Nx beta0 beta1 beta2 seed [K] [N] [Ntherm]\n", argv[0]);
 		return 1;
 	}
 	const char *groupfilename = argv[1];
@@ -210,8 +210,13 @@ int main(int argc, char *argv[]) {
 	beta1 = atof(argv[6]);
 	beta2 = atof(argv[7]);
 	int iseed = atoi(argv[8]);
+	/* Optional sweep counts; default to K_DEFAULT / N_DEFAULT / NTHERM_DEFAULT. */
+	unsigned K      = (argc >  9) ? (unsigned)atoi(argv[9])  : K_DEFAULT;
+	unsigned N      = (argc > 10) ? (unsigned)atoi(argv[10]) : N_DEFAULT;
+	unsigned NTHERM = (argc > 11) ? (unsigned)atoi(argv[11]) : NTHERM_DEFAULT;
 	printf("PARAMS(grp,D,Nt,Nx,beta0,beta1,beta2,seed): %s %d %d %d %e %e %e %d\n",
 	       groupfilename, D, Nt, Nx, beta0, beta1, beta2, iseed);
+	printf("RUN(K,N,Ntherm,NHIT): %u %u %u %d\n", K, N, NTHERM, NHIT);
 
 	/* Volume = Nt * Nx^(D-1) (integer product; avoids pow() rounding). */
 	V = Nt;

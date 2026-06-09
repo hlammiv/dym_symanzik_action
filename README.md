@@ -62,6 +62,19 @@ must end with `/`. Example:
 
 Measurement lines in the output log are tagged `GMES:`.
 
+The binary takes optional trailing args to override the sweep counts without
+recompiling (defaults `1000 / 1000 / 0`):
+
+    ./dym-mod-metro <group> D Nt Nx beta0 beta1 beta2 seed [K] [N] [Ntherm]
+
+where `K` = decorrelation sweeps between measurements, `N` = number of
+measurements, `Ntherm` = thermalization sweeps. `dym-mod-metro-savecfg` (which
+writes SU(3) configs in Kentucky format for Wilson-flow scale setting, and needs
+a group file with the defining-rep matrices appended, e.g. `mys1080-v4`) takes
+an `[outprefix]` before those:
+
+    ./dym-mod-metro-savecfg <group> D Nt Nx beta0 beta1 beta2 seed [outprefix] [K] [N] [Ntherm]
+
 ## Analysis
 
 The Python scripts in `scripts/` parse the `GMES:` lines and produce plaquette
